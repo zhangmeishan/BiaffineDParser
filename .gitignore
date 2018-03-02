@@ -1,0 +1,4 @@
+examples/*
+.idea/*
+ctb51/*
+*/__pycache__/*
