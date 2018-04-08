@@ -123,152 +123,6 @@ class LSTM(nn.LSTM):
             if "bias" in name:
                 nn.init.constant(self.__getattr__(name), 0)
 
-'''
-class NewLSTM(nn.Module):
-    """A module that runs multiple steps of LSTM."""
-
-    def __init__(self, input_size, hidden_size, num_layers=1, batch_first=False, \
-                 bidirectional=False, dropout_in=0, dropout_out=0):
-        super(NewLSTM, self).__init__()
-        self.input_size = input_size
-        self.hidden_size = hidden_size
-        self.num_layers = num_layers
-        self.batch_first = batch_first
-        self.bidirectional = bidirectional
-        self.dropout_in = dropout_in
-        self.dropout_out = dropout_out
-        self.num_directions = 2 if bidirectional else 1
-
-        self.fcells = []
-        self.bcells = []
-        for layer in range(num_layers):
-            layer_input_size = input_size if layer == 0 else hidden_size * self.num_directions
-            self.fcells.append(nn.LSTMCell(input_size=layer_input_size, hidden_size=hidden_size))
-            if self.bidirectional:
-                self.bcells.append(nn.LSTMCell(input_size=layer_input_size, hidden_size=hidden_size))
-
-        self.reset_parameters()
-
-    def reset_parameters(self):
-        for layer in range(self.num_layers):
-            self.fcells[layer].reset_parameters()
-            if self.bidirectional:
-                self.bcells[layer].reset_parameters()
-
-    @staticmethod
-    def _forward_rnn(cell, input, masks, initial, drop_masks):
-        max_time = input.size(0)
-        output = []
-        hx = initial
-        for time in range(max_time):
-            h_next, c_next = cell(input=input[time], hx=hx)
-            h_next = h_next * masks[time] + initial[0] * (1 - masks[time])
-            c_next = c_next * masks[time] + initial[1] * (1 - masks[time])
-            output.append(h_next)
-            if drop_masks is not None: h_next = h_next * drop_masks
-            hx = (h_next, c_next)
-        output = torch.stack(output, 0)
-        return output, hx
-
-    @staticmethod
-    def _forward_brnn(cell, input, masks, initial, drop_masks):
-        max_time = input.size(0)
-        output = []
-        hx = initial
-        for time in reversed(range(max_time)):
-            h_next, c_next = cell(input=input[time], hx=hx)
-            h_next = h_next * masks[time] + initial[0] * (1 - masks[time])
-            c_next = c_next * masks[time] + initial[1] * (1 - masks[time])
-            output.append(h_next)
-            if drop_masks is not None: h_next = h_next * drop_masks
-            hx = (h_next, c_next)
-        output.reverse()
-        output = torch.stack(output, 0)
-        return output, hx
-
-    def forward(self, input, masks, initial=None):
-        if self.batch_first:
-            input = input.transpose(0, 1)
-            masks = torch.unsqueeze(masks.transpose(0, 1), dim=2)
-        max_time, batch_size, _ = input.size()
-        masks = masks.expand(-1, -1, self.hidden_size)
-
-        if initial is None:
-            initial = Variable(input.data.new(batch_size, self.hidden_size).zero_())
-            initial = (initial, initial)
-        h_n = []
-        c_n = []
-
-        for layer in range(self.num_layers):
-            max_time, batch_size, input_size = input.size()
-            input_mask, hidden_mask = None, None
-            if self.training:
-                input_mask = input.data.new(batch_size, input_size).fill_(1 - self.dropout_in)
-                input_mask = Variable(torch.bernoulli(input_mask), requires_grad=False)
-                input_mask = input_mask / (1 - self.dropout_in)
-                input_mask = torch.unsqueeze(input_mask, dim=2).expand(-1, -1, max_time).permute(2, 0, 1)
-                input = input * input_mask
-
-                hidden_mask = input.data.new(batch_size, self.hidden_size).fill_(1 - self.dropout_out)
-                hidden_mask = Variable(torch.bernoulli(hidden_mask), requires_grad=False)
-                hidden_mask = hidden_mask / (1 - self.dropout_out)
-
-            layer_output, (layer_h_n, layer_c_n) = NewLSTM._forward_rnn(cell=self.fcells[layer], \
-                         input=input, masks=masks, initial=initial, drop_masks=hidden_mask)
-            if self.bidirectional:
-                blayer_output, (blayer_h_n, blayer_c_n) = NewLSTM._forward_brnn(cell=self.bcells[layer], \
-                       input=input, masks=masks, initial=initial, drop_masks=hidden_mask)
-
-            h_n.append(torch.cat([layer_h_n, blayer_h_n], 1) if self.bidirectional else layer_h_n)
-            c_n.append(torch.cat([layer_c_n, blayer_c_n], 1) if self.bidirectional else layer_c_n)
-            input = torch.cat([layer_output, blayer_output], 2) if self.bidirectional else layer_output
-
-        h_n = torch.stack(h_n, 0)
-        c_n = torch.stack(c_n, 0)
-
-        return input, (h_n, c_n)
-
-class LSTMCell(nn.Module):
-    def __init__(self, input_size, hidden_size):
-        super().__init__()
-        self.input_size = input_size
-        self.hidden_size = hidden_size
-        self.linear_ih = nn.Linear(in_features=input_size,
-                                   out_features=4 * hidden_size)
-        self.linear_hh = nn.Linear(in_features=hidden_size,
-                                   out_features=4 * hidden_size,
-                                   bias=False)
-        self.sigmoid = nn.Sigmoid()
-        self.tanh = nn.Tanh()
-
-
-    def reset_parameters(self):
-        W = orthonormal_initializer(self.hidden_size, self.hidden_size + self.input_size)
-        W_h, W_x = W[:, :self.hidden_size], W[:, self.hidden_size:]
-        self.linear_ih.weight.data.copy_(torch.from_numpy(np.concatenate([W_x] * 4, 0)))
-        self.linear_hh.weight.data.copy_(torch.from_numpy(np.concatenate([W_h] * 4, 0)))
-
-        b = np.zeros(4 * self.hidden_size, dtype=np.float32)
-        b[self.hidden_size:2 * self.hidden_size] = -1.0
-        self.linear_ih.bias.data.copy_(torch.from_numpy(b))
-
-
-
-    def forward(self, input, hx):
-        if hx is None:
-            batch_size = input.size(0)
-            zero_hx = Variable(
-                input.data.new(batch_size, self.hidden_size).zero_())
-            hx = (zero_hx, zero_hx)
-        h, c = hx
-        lstm_vector = self.linear_ih(input) + self.linear_hh(h)
-        i, f, g, o = lstm_vector.chunk(chunks=4, dim=1)
-        f = f + 1
-        new_c = c*self.sigmoid(f) + self.sigmoid(i)*self.tanh(g)
-        new_h = self.tanh(new_c) * self.sigmoid(o)
-        return new_h, new_c
-'''
-
 class MyLSTM(nn.Module):
 
     """A module that runs multiple steps of LSTM."""
@@ -320,21 +174,27 @@ class MyLSTM(nn.Module):
 
     def reset_parameters(self):
         for layer in range(self.num_layers):
-            param_ih_name = 'weight_ih_l{}{}'.format(layer, '')
-            param_hh_name = 'weight_hh_l{}{}'.format(layer, '')
-            param_ih = self.__getattr__(param_ih_name)
-            param_hh = self.__getattr__(param_hh_name)
-            W = orthonormal_initializer(self.hidden_size, self.hidden_size + self.input_size)
-            W_h, W_x = W[:, :self.hidden_size], W[:, self.hidden_size:]
-            param_ih.data.copy_(torch.from_numpy(np.concatenate([W_x] * 4, 0)))
-            param_hh.data.copy_(torch.from_numpy(np.concatenate([W_h] * 4, 0)))
-
             if self.bidirectional:
                 param_ih_name = 'weight_ih_l{}{}'.format(layer, '_reverse')
                 param_hh_name = 'weight_hh_l{}{}'.format(layer, '_reverse')
                 param_ih = self.__getattr__(param_ih_name)
                 param_hh = self.__getattr__(param_hh_name)
-                W = orthonormal_initializer(self.hidden_size, self.hidden_size + self.input_size)
+                if layer == 0:
+                    W = orthonormal_initializer(self.hidden_size, self.hidden_size + self.input_size)
+                else:
+                    W = orthonormal_initializer(self.hidden_size, self.hidden_size + 2 * self.hidden_size)
+                W_h, W_x = W[:, :self.hidden_size], W[:, self.hidden_size:]
+                param_ih.data.copy_(torch.from_numpy(np.concatenate([W_x] * 4, 0)))
+                param_hh.data.copy_(torch.from_numpy(np.concatenate([W_h] * 4, 0)))
+            else:
+                param_ih_name = 'weight_ih_l{}{}'.format(layer, '')
+                param_hh_name = 'weight_hh_l{}{}'.format(layer, '')
+                param_ih = self.__getattr__(param_ih_name)
+                param_hh = self.__getattr__(param_hh_name)
+                if layer == 0:
+                    W = orthonormal_initializer(self.hidden_size, self.hidden_size + self.input_size)
+                else:
+                    W = orthonormal_initializer(self.hidden_size, self.hidden_size + self.hidden_size)
                 W_h, W_x = W[:, :self.hidden_size], W[:, self.hidden_size:]
                 param_ih.data.copy_(torch.from_numpy(np.concatenate([W_x] * 4, 0)))
                 param_hh.data.copy_(torch.from_numpy(np.concatenate([W_h] * 4, 0)))
