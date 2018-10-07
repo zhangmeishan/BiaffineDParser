@@ -10,4 +10,4 @@ python3.6 driver/TrainTest.py --config_file config.ctb51.cfg
 
 ## Results:
 CTB51:  90.84 (UAS) 89.57 (LAS)    
-PTB (Stanford Dependencies) :  95.84 (UAS) p4.15 (LAS)    
+PTB (Stanford Dependencies) :  95.84 (UAS) 94.15 (LAS)    
